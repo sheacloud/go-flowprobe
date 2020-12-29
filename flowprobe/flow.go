@@ -11,32 +11,36 @@ import (
 )
 
 // Flow represents an aggregated network flow of TCP traffic
-type Flow struct {
-	FlowKey
+type IPv4Flow struct {
+	IPv4FlowKey
+	FlowMetadata
+}
+
+type FlowMetadata struct {
 	FlowStartMilliseconds uint64
 	FlowEndMilliseconds   uint64
 	TotalBytes            uint64
 	TotalPackets          uint64
 }
 
-func (t Flow) String() string {
+func (f IPv4Flow) String() string {
 	srcIPBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(srcIPBytes, t.SourceIPv4Address)
+	binary.BigEndian.PutUint32(srcIPBytes, f.SourceIPv4Address)
 	srcIP := net.IP(srcIPBytes)
 
 	dstIPBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(dstIPBytes, t.DestinationIPv4Address)
+	binary.BigEndian.PutUint32(dstIPBytes, f.DestinationIPv4Address)
 	dstIP := net.IP(dstIPBytes)
 
-	startTime := time.Unix(0, int64(t.FlowStartMilliseconds)*1000000)
-	endTime := time.Unix(0, int64(t.FlowEndMilliseconds)*1000000)
+	startTime := time.Unix(0, int64(f.FlowStartMilliseconds)*1000000)
+	endTime := time.Unix(0, int64(f.FlowEndMilliseconds)*1000000)
 
-	return fmt.Sprintf("%v:%v -> %v:%v %v from %v to %v, bytes=%v packets=%v", srcIP, t.SourcePort, dstIP, t.DestinationPort, t.Protocol, startTime, endTime, t.TotalBytes, t.TotalPackets)
+	return fmt.Sprintf("%v:%v -> %v:%v %v from %v to %v, bytes=%v packets=%v", srcIP, f.SourcePort, dstIP, f.DestinationPort, f.Protocol, startTime, endTime, f.TotalBytes, f.TotalPackets)
 }
 
-// FlowKey represents the unique 5-tuple flow key used for tracking a flow
+// IPv4FlowKey represents the unique 5-tuple flow key used for tracking a flow
 // The key must be "comparable" so it can be used as a map key
-type FlowKey struct {
+type IPv4FlowKey struct {
 	SourceIPv4Address      uint32
 	DestinationIPv4Address uint32
 	SourcePort             uint16
@@ -44,9 +48,15 @@ type FlowKey struct {
 	Protocol               uint8
 }
 
-// GetPacketFlowKey returns the unique flow key of a packet, assuming it's IPv4 or IPv6
-func GetPacketFlowKey(packet gopacket.Packet) (FlowKey, error) {
-	var key FlowKey
+// Hash returns a 32bit hash of the flow key
+func (fk *IPv4FlowKey) Hash() uint32 {
+	//TODO determine if a better hash function should be used
+	return fk.SourceIPv4Address + fk.DestinationIPv4Address + uint32(fk.SourcePort) + uint32(fk.DestinationPort) + uint32(fk.Protocol)
+}
+
+// GetPacketIPv4FlowKey returns the unique flow key of a packet, assuming it's IPv4 or IPv6
+func GetPacketIPv4FlowKey(packet gopacket.Packet) (IPv4FlowKey, error) {
+	var key IPv4FlowKey
 
 	var srcIP, dstIP net.IP
 	var srcPort, dstPort uint16
@@ -88,7 +98,7 @@ func GetPacketFlowKey(packet gopacket.Packet) (FlowKey, error) {
 		return key, fmt.Errorf("Unsupported transport layer: %s", transportLayerType)
 	}
 
-	key = FlowKey{
+	key = IPv4FlowKey{
 		SourceIPv4Address:      binary.BigEndian.Uint32(srcIP),
 		DestinationIPv4Address: binary.BigEndian.Uint32(dstIP),
 		SourcePort:             srcPort,

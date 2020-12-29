@@ -20,16 +20,26 @@ type FlowTrackerConfiguration struct {
 }
 
 type FlowTracker struct {
-	FlowTable     map[FlowKey]*FlowStatistics
-	flowTableLock sync.Mutex
-	outputChannel chan Flow
+	IPv4FlowTable     IPv4FlowTable
+	ipv4FlowTableLock sync.Mutex
+	ipv4OutputChannel chan IPv4Flow
 }
 
-func NewFlowTracker(outputChannel chan Flow) *FlowTracker {
+func NewFlowTracker(ipv4OutputChannel chan IPv4Flow) *FlowTracker {
 	return &FlowTracker{
-		FlowTable:     make(map[FlowKey]*FlowStatistics),
-		outputChannel: outputChannel,
+		IPv4FlowTable:     make(IPv4FlowTable),
+		ipv4OutputChannel: ipv4OutputChannel,
 	}
+}
+
+func (ft *FlowTracker) SweepTables() {
+
+	go func() {
+		ft.ipv4FlowTableLock.Lock()
+		defer ft.ipv4FlowTableLock.Unlock()
+		ft.IPv4FlowTable.SweepTable(ft.ipv4OutputChannel)
+	}()
+
 }
 
 func (ft *FlowTracker) Start() {
@@ -40,42 +50,7 @@ func (ft *FlowTracker) Start() {
 			select {
 			case <-ticker.C:
 				// run through flow table and clean up old flows
-				ft.flowTableLock.Lock()
-				now := uint64(time.Now().UnixNano()) / 1000000
-				for key, stats := range ft.FlowTable {
-					switch key.Protocol {
-					case 6:
-						// check if flow has timed out
-						if now-stats.FlowLastSeen >= 3000 {
-							// export flow
-							flow := Flow{
-								FlowKey:               key,
-								FlowStartMilliseconds: stats.FlowStartTime,
-								FlowEndMilliseconds:   stats.FlowLastSeen,
-								TotalBytes:            stats.TotalBytes,
-								TotalPackets:          stats.TotalPackets,
-							}
-							ft.outputChannel <- flow
-						}
-					case 17:
-						// check if flow has timed out
-						if now-stats.FlowLastSeen >= 3000 {
-							// export flow
-							flow := Flow{
-								FlowKey:               key,
-								FlowStartMilliseconds: stats.FlowStartTime,
-								FlowEndMilliseconds:   stats.FlowLastSeen,
-								TotalBytes:            stats.TotalBytes,
-								TotalPackets:          stats.TotalPackets,
-							}
-							ft.outputChannel <- flow
-						}
-					default:
-						continue
-					}
-
-				}
-				ft.flowTableLock.Unlock()
+				ft.SweepTables()
 			case <-tickerStop:
 				ticker.Stop()
 				return
@@ -84,26 +59,9 @@ func (ft *FlowTracker) Start() {
 	}()
 }
 
-func (ft *FlowTracker) TrackPacket(key FlowKey, packet gopacket.Packet) {
-	ft.flowTableLock.Lock()
-	defer ft.flowTableLock.Unlock()
+func (ft *FlowTracker) TrackIPv4Packet(key IPv4FlowKey, packet gopacket.Packet) {
+	ft.ipv4FlowTableLock.Lock()
+	defer ft.ipv4FlowTableLock.Unlock()
 
-	stats, ok := ft.FlowTable[key]
-	if !ok {
-		stats = &FlowStatistics{
-			TotalBytes:    uint64(len(packet.NetworkLayer().LayerPayload())),
-			TotalPackets:  1,
-			FlowStartTime: uint64(packet.Metadata().Timestamp.UnixNano()) / 1000000,
-			FlowLastSeen:  uint64(packet.Metadata().Timestamp.UnixNano()) / 1000000,
-		}
-		ft.FlowTable[key] = stats
-	} else {
-		stats.TotalBytes += uint64(len(packet.NetworkLayer().LayerPayload()))
-		stats.TotalPackets++
-		stats.FlowLastSeen = uint64(packet.Metadata().Timestamp.UnixNano()) / 1000000
-
-		// fmt.Println(stats)
-	}
-
-	//Try to determine if the flow is complete by checking TCP flags
+	ft.IPv4FlowTable.TrackPacket(key, packet)
 }

@@ -22,7 +22,7 @@ func main() {
 	ipfixIP := os.Getenv("GOFLOWPROBE_IPFIX_IP")
 	ipfixPortString := os.Getenv("GOFLOWPROBE_IPFIX_PORT")
 	if iface == "" {
-		iface = "eno1"
+		iface = "en11"
 	}
 	if ipfixIP == "" {
 		ipfixIP = "127.0.0.1"
@@ -40,10 +40,10 @@ func main() {
 	} else {
 		packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 
-		flowChannel := make(chan flowprobe.Flow)
-		router = flowprobe.NewFlowRouter(packetSource.Packets(), 1, flowChannel)
+		ipv4FlowChannel := make(chan flowprobe.IPv4Flow)
+		router = flowprobe.NewFlowRouter(packetSource.Packets(), 4, ipv4FlowChannel)
 
-		exporter = flowprobe.NewFlowExporter(net.ParseIP(ipfixIP), ipfixPort, flowChannel)
+		exporter = flowprobe.NewFlowExporter(net.ParseIP(ipfixIP), ipfixPort, ipv4FlowChannel)
 
 		exporter.Start()
 		router.Start()

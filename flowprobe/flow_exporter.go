@@ -2,7 +2,6 @@ package flowprobe
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"net"
 
@@ -16,14 +15,14 @@ func init() {
 }
 
 type FlowExporter struct {
-	exporter        *exporter.ExportingProcess
-	dataSet         entities.Set
-	templateID      uint16
-	FlowRecordsSent uint64
-	RecordBuffer    bytes.Buffer
-	ElementBuffer   []*entities.InfoElementWithValue
-	StopChannel     chan bool
-	InputChannel    chan Flow
+	exporter         *exporter.ExportingProcess
+	dataSet          entities.Set
+	templateID       uint16
+	FlowRecordsSent  uint64
+	RecordBuffer     bytes.Buffer
+	ElementBuffer    []*entities.InfoElementWithValue
+	StopChannel      chan bool
+	IPv4InputChannel chan IPv4Flow
 }
 
 var sourceIPv4AddressElement *entities.InfoElement
@@ -36,7 +35,7 @@ var flowEndMillisecondsElement *entities.InfoElement
 var octetTotalCountElement *entities.InfoElement
 var packetTotalCountElement *entities.InfoElement
 
-func NewFlowExporter(collectorIp net.IP, collectorPort int, inputChannel chan Flow) *FlowExporter {
+func NewFlowExporter(collectorIp net.IP, collectorPort int, ipv4InputChannel chan IPv4Flow) *FlowExporter {
 
 	udpAddr := net.UDPAddr{
 		IP:   collectorIp,
@@ -51,40 +50,40 @@ func NewFlowExporter(collectorIp net.IP, collectorPort int, inputChannel chan Fl
 	dataSet := entities.NewSet(entities.Data, templateID, false)
 
 	return &FlowExporter{
-		exporter:      exporter,
-		dataSet:       dataSet,
-		RecordBuffer:  bytes.Buffer{},
-		ElementBuffer: make([]*entities.InfoElementWithValue, 9),
-		templateID:    templateID,
-		StopChannel:   make(chan bool),
-		InputChannel:  inputChannel,
+		exporter:         exporter,
+		dataSet:          dataSet,
+		RecordBuffer:     bytes.Buffer{},
+		ElementBuffer:    make([]*entities.InfoElementWithValue, 9),
+		templateID:       templateID,
+		StopChannel:      make(chan bool),
+		IPv4InputChannel: ipv4InputChannel,
 	}
 }
 
 func (fe *FlowExporter) Start() {
-	templateElementNames := []string{"sourceIPv4Address", "destinationIPv4Address", "sourceTransportPort", "destinationTransportPort", "protocolIdentifier", "flowStartMilliseconds", "flowEndMilliseconds", "octetTotalCount", "packetTotalCount"}
-
-	// Create template record with two fields
-	templateSet := entities.NewSet(entities.Template, fe.templateID, false)
-	elements := make([]*entities.InfoElementWithValue, 0)
-
-	for _, elementName := range templateElementNames {
-		element, err := registry.GetInfoElement(elementName, registry.IANAEnterpriseID)
-		if err != nil {
-			fmt.Printf("Did not find the element with name %v\n", elementName)
-			return
-		}
-		ie := entities.NewInfoElementWithValue(element, nil)
-		elements = append(elements, ie)
-	}
-
-	templateSet.AddRecord(elements, fe.templateID)
-
-	_, err := fe.exporter.SendSet(templateSet)
-	if err != nil {
-		fmt.Printf("Got error when sending record: %v\n", err)
-		return
-	}
+	// templateElementNames := []string{"sourceIPv4Address", "destinationIPv4Address", "sourceTransportPort", "destinationTransportPort", "protocolIdentifier", "flowStartMilliseconds", "flowEndMilliseconds", "octetTotalCount", "packetTotalCount"}
+	//
+	// // Create template record with two fields
+	// templateSet := entities.NewSet(entities.Template, fe.templateID, false)
+	// elements := make([]*entities.InfoElementWithValue, 0)
+	//
+	// for _, elementName := range templateElementNames {
+	// 	element, err := registry.GetInfoElement(elementName, registry.IANAEnterpriseID)
+	// 	if err != nil {
+	// 		fmt.Printf("Did not find the element with name %v\n", elementName)
+	// 		return
+	// 	}
+	// 	ie := entities.NewInfoElementWithValue(element, nil)
+	// 	elements = append(elements, ie)
+	// }
+	//
+	// templateSet.AddRecord(elements, fe.templateID)
+	//
+	// _, err := fe.exporter.SendSet(templateSet)
+	// if err != nil {
+	// 	fmt.Printf("Got error when sending record: %v\n", err)
+	// 	return
+	// }
 
 	sourceIPv4AddressElement, _ = registry.GetInfoElement("sourceIPv4Address", registry.IANAEnterpriseID)
 	destinationIPv4AddressElement, _ = registry.GetInfoElement("destinationIPv4Address", registry.IANAEnterpriseID)
@@ -103,11 +102,11 @@ func (fe *FlowExporter) Start() {
 			case <-fe.StopChannel:
 				fe.SendDataSet()
 				break InfiniteLoop
-			case flow := <-fe.InputChannel:
+			case flow := <-fe.IPv4InputChannel:
 				if fe.GetCurrentMessageSize() >= 300 {
 					fe.SendDataSet()
 				}
-				fe.AddFlow(flow)
+				fe.AddIPv4Flow(flow)
 			}
 		}
 		fmt.Println("FlowExporter stopped")
@@ -140,24 +139,26 @@ func (fe *FlowExporter) CloseExporter() {
 	fe.exporter.CloseConnToCollector()
 }
 
-func (fe *FlowExporter) AddFlow(flow Flow) {
-	srcIPBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(srcIPBytes, flow.SourceIPv4Address)
-	srcIP := net.IP(srcIPBytes)
+func (fe *FlowExporter) AddIPv4Flow(flow IPv4Flow) {
+	// srcIPBytes := make([]byte, 4)
+	// binary.BigEndian.PutUint32(srcIPBytes, flow.SourceIPv4Address)
+	// srcIP := net.IP(srcIPBytes)
+	//
+	// dstIPBytes := make([]byte, 4)
+	// binary.BigEndian.PutUint32(dstIPBytes, flow.DestinationIPv4Address)
+	// dstIP := net.IP(dstIPBytes)
+	//
+	// fe.ElementBuffer[0] = entities.NewInfoElementWithValue(sourceIPv4AddressElement, srcIP)
+	// fe.ElementBuffer[1] = entities.NewInfoElementWithValue(destinationIPv4AddressElement, dstIP)
+	// fe.ElementBuffer[2] = entities.NewInfoElementWithValue(sourceTransportPortElement, flow.SourcePort)
+	// fe.ElementBuffer[3] = entities.NewInfoElementWithValue(destinationTransportPortElement, flow.DestinationPort)
+	// fe.ElementBuffer[4] = entities.NewInfoElementWithValue(protocolIdentifierElement, flow.Protocol)
+	// fe.ElementBuffer[5] = entities.NewInfoElementWithValue(flowStartMillisecondsElement, flow.FlowStartMilliseconds)
+	// fe.ElementBuffer[6] = entities.NewInfoElementWithValue(flowEndMillisecondsElement, flow.FlowEndMilliseconds)
+	// fe.ElementBuffer[7] = entities.NewInfoElementWithValue(octetTotalCountElement, flow.TotalBytes)
+	// fe.ElementBuffer[8] = entities.NewInfoElementWithValue(packetTotalCountElement, flow.TotalPackets)
+	//
+	// fe.dataSet.AddRecord(fe.ElementBuffer, fe.templateID)
 
-	dstIPBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(dstIPBytes, flow.DestinationIPv4Address)
-	dstIP := net.IP(dstIPBytes)
-
-	fe.ElementBuffer[0] = entities.NewInfoElementWithValue(sourceIPv4AddressElement, srcIP)
-	fe.ElementBuffer[1] = entities.NewInfoElementWithValue(destinationIPv4AddressElement, dstIP)
-	fe.ElementBuffer[2] = entities.NewInfoElementWithValue(sourceTransportPortElement, flow.SourcePort)
-	fe.ElementBuffer[3] = entities.NewInfoElementWithValue(destinationTransportPortElement, flow.DestinationPort)
-	fe.ElementBuffer[4] = entities.NewInfoElementWithValue(protocolIdentifierElement, flow.Protocol)
-	fe.ElementBuffer[5] = entities.NewInfoElementWithValue(flowStartMillisecondsElement, flow.FlowStartMilliseconds)
-	fe.ElementBuffer[6] = entities.NewInfoElementWithValue(flowEndMillisecondsElement, flow.FlowEndMilliseconds)
-	fe.ElementBuffer[7] = entities.NewInfoElementWithValue(octetTotalCountElement, flow.TotalBytes)
-	fe.ElementBuffer[8] = entities.NewInfoElementWithValue(packetTotalCountElement, flow.TotalPackets)
-
-	fe.dataSet.AddRecord(fe.ElementBuffer, fe.templateID)
+	fmt.Println(flow.String())
 }
