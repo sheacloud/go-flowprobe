@@ -55,35 +55,22 @@ func (fk *IPv4FlowKey) Hash() uint32 {
 }
 
 // GetPacketIPv4FlowKey returns the unique flow key of a packet, assuming it's IPv4 or IPv6
-func GetPacketIPv4FlowKey(packet gopacket.Packet) (IPv4FlowKey, error) {
+func GetPacketIPv4FlowKey(linkLayer gopacket.LinkLayer, networkLayer gopacket.NetworkLayer, transportLayer gopacket.TransportLayer) (IPv4FlowKey, error) {
 	var key IPv4FlowKey
 
 	var srcIP, dstIP net.IP
 	var srcPort, dstPort uint16
 	var protocol uint8
 
-	networkLayer := packet.NetworkLayer()
-	if networkLayer == nil {
-		return key, fmt.Errorf("No network layer in packet")
+	// TODO make sure network layer is IPv4
+	if networkLayer.LayerType() != layers.LayerTypeIPv4 {
+		return key, fmt.Errorf("Network layer type not IPv4")
 	}
-	switch networkLayerType := networkLayer.LayerType(); networkLayerType {
-	case layers.LayerTypeIPv4:
-		ipv4Layer := networkLayer.(*layers.IPv4)
-		srcIP = ipv4Layer.SrcIP
-		dstIP = ipv4Layer.DstIP
-		protocol = uint8(ipv4Layer.Protocol)
-	case layers.LayerTypeIPv6:
-		fmt.Println("not implemented")
-		return key, fmt.Errorf("Not implemented IPv6")
-	default:
-		fmt.Println("unsupported network layer")
-		return key, fmt.Errorf("Unsupported network layer: %s", networkLayerType)
-	}
+	ipv4Layer := networkLayer.(*layers.IPv4)
+	srcIP = ipv4Layer.SrcIP
+	dstIP = ipv4Layer.DstIP
+	protocol = uint8(ipv4Layer.Protocol)
 
-	transportLayer := packet.TransportLayer()
-	if transportLayer == nil {
-		return key, fmt.Errorf("No transport layer in packet")
-	}
 	switch transportLayerType := transportLayer.LayerType(); transportLayerType {
 	case layers.LayerTypeTCP:
 		tcpLayer := transportLayer.(*layers.TCP)

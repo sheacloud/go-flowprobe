@@ -4,24 +4,26 @@ import (
 	"time"
 
 	"github.com/google/gopacket"
+	"github.com/sheacloud/go-flowprobe/utils"
 )
 
 type IPv4FlowTable map[IPv4FlowKey]*FlowStatistics
 
-func (ft IPv4FlowTable) TrackPacket(key IPv4FlowKey, packet gopacket.Packet) {
+func (ft IPv4FlowTable) TrackPacket(key IPv4FlowKey, ci gopacket.CaptureInfo) {
 	stats, ok := ft[key]
 	if !ok {
 		stats = &FlowStatistics{
-			TotalBytes:    uint64(len(packet.NetworkLayer().LayerPayload())),
+			TotalBytes:    uint64(ci.Length),
 			TotalPackets:  1,
-			FlowStartTime: uint64(packet.Metadata().Timestamp.UnixNano()) / 1000000,
-			FlowLastSeen:  uint64(packet.Metadata().Timestamp.UnixNano()) / 1000000,
+			FlowStartTime: uint64(ci.Timestamp.UnixNano()) / 1000000,
+			FlowLastSeen:  uint64(ci.Timestamp.UnixNano()) / 1000000,
 		}
 		ft[key] = stats
+		utils.FlowsTracked.Inc()
 	} else {
-		stats.TotalBytes += uint64(len(packet.NetworkLayer().LayerPayload()))
+		stats.TotalBytes += uint64(ci.Length)
 		stats.TotalPackets++
-		stats.FlowLastSeen = uint64(packet.Metadata().Timestamp.UnixNano()) / 1000000
+		stats.FlowLastSeen = uint64(ci.Timestamp.UnixNano()) / 1000000
 	}
 }
 
