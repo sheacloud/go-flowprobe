@@ -12,7 +12,7 @@ var (
 		},
 	)
 
-	ActiveIPv4Flows = prometheus.NewGaugeVec(
+	ActiveFlows = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "active_ipv4_flows",
 			Help: "Number of active IPv4 flows in each flow tracking table",
@@ -23,5 +23,5 @@ var (
 
 func init() {
 	prometheus.MustRegister(FlowsTracked)
-	prometheus.MustRegister(ActiveIPv4Flows)
+	prometheus.MustRegister(ActiveFlows)
 }

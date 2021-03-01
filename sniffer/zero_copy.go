@@ -1,4 +1,4 @@
-package flowprobe
+package sniffer
 
 import (
 	"fmt"
@@ -9,6 +9,9 @@ import (
 	"github.com/google/gopacket/afpacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
+	"github.com/sheacloud/go-flowprobe/flow"
+	"github.com/sheacloud/go-flowprobe/tracker"
+	"k8s.io/klog"
 )
 
 // afpacketComputeSize computes the block_size and the num_blocks in such a way that the
@@ -35,17 +38,15 @@ func afpacketComputeSize(targetSizeMb int, snaplen int, pageSize int) (
 	return frameSize, blockSize, numBlocks, nil
 }
 
-// FlowSniffer reads from a packet stream and routes it to a FlowTracker based on it's keys
-type FlowSniffer struct {
-	FlowTracker  *FlowTracker
+// ZeroCopyFlowSniffer reads from a zero-copy packet stream (like afpacket) and routes it to a FlowTracker based on it's keys
+type ZeroCopyFlowSniffer struct {
+	FlowTracker  *tracker.FlowTracker
 	PacketSource gopacket.ZeroCopyPacketDataSource
-	device       string
-	fanoutID     uint16
 	StopChannel  chan bool
 }
 
 // Start the flow router
-func (fr *FlowSniffer) Start() {
+func (fr *ZeroCopyFlowSniffer) Start() {
 	fr.FlowTracker.Start()
 
 	go func() {
@@ -53,10 +54,11 @@ func (fr *FlowSniffer) Start() {
 		var ip4 layers.IPv4
 		var tcp layers.TCP
 		var udp layers.UDP
-		var ipv4FlowKey IPv4FlowKey
+		var icmpv4 layers.ICMPv4
+		var flowKey flow.FlowKey
 		var networkLayer gopacket.NetworkLayer
 		var transportLayer gopacket.TransportLayer
-		parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &tcp, &udp)
+		parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &tcp, &udp, &icmpv4)
 		decoded := []gopacket.LayerType{}
 	InfiniteLoop:
 		for {
@@ -70,11 +72,11 @@ func (fr *FlowSniffer) Start() {
 					log.Fatal(err)
 				}
 
-				if err := parser.DecodeLayers(data, &decoded); err != nil {
-					continue
-				}
+				parser.DecodeLayers(data, &decoded)
 
 				isIPv4 := false
+				networkLayer = nil
+				transportLayer = nil
 				for _, layerType := range decoded {
 					switch layerType {
 					case layers.LayerTypeIPv4:
@@ -87,27 +89,25 @@ func (fr *FlowSniffer) Start() {
 					}
 				}
 				if isIPv4 {
-					ipv4FlowKey, err = GetPacketIPv4FlowKey(&eth, networkLayer, transportLayer)
+					flowKey, err = flow.GetPacketFlowKey(networkLayer, transportLayer)
 					if err != nil {
+						klog.Error("Error getting flow key from packet")
 						continue
 					}
-					fr.FlowTracker.TrackIPv4Flow(ipv4FlowKey, ci)
+					fr.FlowTracker.TrackFlow(flowKey, networkLayer, transportLayer, ci)
 				}
 			}
 		}
-		fmt.Println("FlowSniffer stopped")
+		fmt.Println("ZeroCopyFlowSniffer stopped")
 	}()
 }
 
 // Stop the flow router
-func (fr *FlowSniffer) Stop() {
+func (fr *ZeroCopyFlowSniffer) Stop() {
 	fr.StopChannel <- true
 }
 
-// NewFlowSniffer instantiates a FlowSniffer
-func NewFlowSniffer(device string, fanoutID uint16, ipv4OutputChannel chan IPv4Flow, snifferNumber uint32) *FlowSniffer {
-	flowTracker := NewFlowTracker(ipv4OutputChannel, snifferNumber)
-
+func ZeroCopyPacketDataSourceFromDevice(device string, fanoutID uint16) gopacket.ZeroCopyPacketDataSource {
 	szFrame, szBlock, numBlocks, err := afpacketComputeSize(8, 65535, os.Getpagesize())
 	if err != nil {
 		log.Fatal(err)
@@ -131,11 +131,16 @@ func NewFlowSniffer(device string, fanoutID uint16, ipv4OutputChannel chan IPv4F
 
 	source := gopacket.ZeroCopyPacketDataSource(tPacket)
 
-	return &FlowSniffer{
+	return source
+}
+
+// NewZeroCopyFlowSniffer instantiates a ZeroCopyFlowSniffer
+func NewZeroCopyFlowSniffer(source gopacket.ZeroCopyPacketDataSource, outputChannel chan flow.Flow, snifferNumber uint16) *ZeroCopyFlowSniffer {
+	flowTracker := tracker.NewFlowTracker(outputChannel, 2)
+
+	return &ZeroCopyFlowSniffer{
 		FlowTracker:  flowTracker,
 		PacketSource: source,
 		StopChannel:  make(chan bool),
-		device:       device,
-		fanoutID:     fanoutID,
 	}
 }

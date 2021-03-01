@@ -1,9 +1,7 @@
 package main
 
 import (
-	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,13 +10,28 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sheacloud/go-flowprobe/flowprobe"
+	"github.com/sheacloud/go-flowprobe/exporter"
+	"github.com/sheacloud/go-flowprobe/flow"
+	"github.com/sheacloud/go-flowprobe/sniffer"
 
 	_ "net/http/pprof"
 )
 
-var exporter *flowprobe.FlowExporter
-var sniffers []*flowprobe.FlowSniffer
+var ipfixExporter *exporter.IpfixFlowExporter
+var sniffers []sniffer.FlowSniffer
+
+func signalHandler(stopCh chan struct{}) {
+	signalCh := make(chan os.Signal, 1)
+	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+
+	for {
+		select {
+		case <-signalCh:
+			close(stopCh)
+			return
+		}
+	}
+}
 
 func httpServer() {
 	http.Handle("/metrics", promhttp.Handler())
@@ -28,14 +41,15 @@ func httpServer() {
 func main() {
 
 	iface := os.Getenv("GOFLOWPROBE_IFACE")
-	ipfixIP := os.Getenv("GOFLOWPROBE_IPFIX_IP")
+	ipfixTarget := os.Getenv("GOFLOWPROBE_IPFIX_TARGET")
 	ipfixPortString := os.Getenv("GOFLOWPROBE_IPFIX_PORT")
 	numSniffersString := os.Getenv("GOFLOWPROBE_NUM_SNIFFERS")
+	zeroCopy := os.Getenv("GOFLOWPROBE_ZEROCOPY")
 	if iface == "" {
 		iface = "eno1"
 	}
-	if ipfixIP == "" {
-		ipfixIP = "127.0.0.1"
+	if ipfixTarget == "" {
+		ipfixTarget = "127.0.0.1"
 	}
 	if ipfixPortString == "" {
 		ipfixPortString = "4739"
@@ -51,43 +65,42 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	if zeroCopy == "" {
+		zeroCopy = "true"
+	}
 
 	go httpServer()
 
-	ipv4FlowChannel := make(chan flowprobe.IPv4Flow)
+	flowChannel := make(chan flow.Flow)
 
-	sniffers = make([]*flowprobe.FlowSniffer, numSniffers)
-	var i uint32
-	for i = 0; i < uint32(numSniffers); i++ {
-		sniffers[i] = flowprobe.NewFlowSniffer(iface, 0, ipv4FlowChannel, i)
+	sniffers = make([]sniffer.FlowSniffer, numSniffers)
+	var i uint16
+	for i = 0; i < uint16(numSniffers); i++ {
+		if zeroCopy == "true" {
+			source := sniffer.ZeroCopyPacketDataSourceFromDevice(iface, i)
+			sniffers[i] = sniffer.NewZeroCopyFlowSniffer(source, flowChannel, i)
+		} else {
+			sniffers[i] = sniffer.NewPCAPFlowSniffer(iface, flowChannel, i)
+		}
 	}
 
-	exporter = flowprobe.NewFlowExporter(net.ParseIP(ipfixIP), ipfixPort, ipv4FlowChannel)
+	ipfixExporter = exporter.NewIpfixFlowExporter(ipfixTarget, ipfixPort, flowChannel)
 
-	exporter.Start()
+	ipfixExporter.Start()
 
 	for _, sniffer := range sniffers {
 		sniffer.Start()
 	}
 
-	SetupCloseHandler()
+	stopCh := make(chan struct{})
+	go signalHandler(stopCh)
 
-	for {
-		time.Sleep(5 * time.Second)
+	<-stopCh
+	for _, sniffer := range sniffers {
+		sniffer.Stop()
 	}
-}
-
-func SetupCloseHandler() {
-	c := make(chan os.Signal)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		fmt.Println("\r- Ctrl+C pressed in Terminal")
-		exporter.Stop()
-		for _, sniffer := range sniffers {
-			sniffer.Stop()
-		}
-		time.Sleep(2 * time.Second)
-		os.Exit(0)
-	}()
+	time.Sleep(2 * time.Second)
+	ipfixExporter.Stop()
+	time.Sleep(2 * time.Second)
+	os.Exit(0)
 }
