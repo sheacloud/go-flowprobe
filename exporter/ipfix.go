@@ -3,14 +3,15 @@ package exporter
 import (
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/google/gopacket/layers"
 	"github.com/sheacloud/go-flowprobe/flow"
+	"github.com/sirupsen/logrus"
 	"github.com/vmware/go-ipfix/pkg/entities"
 	"github.com/vmware/go-ipfix/pkg/exporter"
 	"github.com/vmware/go-ipfix/pkg/registry"
-	"k8s.io/klog"
 )
 
 func init() {
@@ -30,6 +31,8 @@ type IpfixFlowExporter struct {
 	InputChannel             chan flow.Flow
 	collectorTarget          string
 	collectorPort            int
+	maxRecordSize            int
+	waitGroup                *sync.WaitGroup
 }
 
 var sourceIPv4AddressElement *entities.InfoElement
@@ -64,7 +67,7 @@ func fetchAddrFromName(hostname string) (net.IP, error) {
 
 }
 
-func NewIpfixFlowExporter(collectorTarget string, collectorPort int, flowInputChannel chan flow.Flow) *IpfixFlowExporter {
+func NewIpfixFlowExporter(collectorTarget string, collectorPort, maxRecordSize int, flowInputChannel chan flow.Flow, waitGroup *sync.WaitGroup) *IpfixFlowExporter {
 	flowExporter := &IpfixFlowExporter{
 		UniElementBuffer: make([]*entities.InfoElementWithValue, 9),
 		BiElementBuffer:  make([]*entities.InfoElementWithValue, 11),
@@ -72,21 +75,25 @@ func NewIpfixFlowExporter(collectorTarget string, collectorPort int, flowInputCh
 		InputChannel:     flowInputChannel,
 		collectorTarget:  collectorTarget,
 		collectorPort:    collectorPort,
+		maxRecordSize:    maxRecordSize,
+		waitGroup:        waitGroup,
 	}
 
-	flowExporter.refreshExporter()
+	flowExporter.reconnectExporter()
 
 	return flowExporter
 }
 
-func (fe *IpfixFlowExporter) refreshExporter() {
+func (fe *IpfixFlowExporter) reconnectExporter() {
 	ip, _ := fetchAddrFromName(fe.collectorTarget)
 
 	var exporterProcess *exporter.ExportingProcess
 
 	operation := func() error {
 		var err error
-		fmt.Printf("creating exporter\n")
+		logrus.WithFields(logrus.Fields{
+			"ip": ip,
+		}).Info("Reconnecting IPFIX Exporter")
 		exporterProcess, err = exporter.InitExportingProcess(exporter.ExporterInput{
 			CollectorAddress:    fmt.Sprintf("%v:%v", ip, fe.collectorPort),
 			CollectorProtocol:   "tcp",
@@ -94,7 +101,10 @@ func (fe *IpfixFlowExporter) refreshExporter() {
 			TempRefTimeout:      0,
 		})
 		if err != nil {
-			fmt.Printf("got error creating exporting process %s\n", err)
+			logrus.WithFields(logrus.Fields{
+				"ip":    ip,
+				"error": err,
+			}).Error("Error creating exporting process")
 		}
 
 		return err
@@ -102,7 +112,9 @@ func (fe *IpfixFlowExporter) refreshExporter() {
 
 	err := backoff.Retry(operation, backoff.NewExponentialBackOff())
 	if err != nil {
-		panic("failed to create exporter")
+		logrus.WithFields(logrus.Fields{
+			"error": err,
+		}).Panic("Failed to create exporting process")
 	}
 
 	uniTemplateID := exporterProcess.NewTemplateID()
@@ -120,7 +132,7 @@ func (fe *IpfixFlowExporter) refreshExporter() {
 	fe.exporter = exporterProcess
 }
 
-func (fe *IpfixFlowExporter) refreshUniTemplate() {
+func (fe *IpfixFlowExporter) refreshUniTemplate() error {
 	templateElementNames := []string{"sourceIPv4Address", "destinationIPv4Address", "sourceTransportPort", "destinationTransportPort", "protocolIdentifier", "flowStartMilliseconds", "flowEndMilliseconds", "octetDeltaCount", "packetDeltaCount"}
 
 	templateSet := entities.NewSet(false)
@@ -130,8 +142,9 @@ func (fe *IpfixFlowExporter) refreshUniTemplate() {
 	for _, elementName := range templateElementNames {
 		element, err := registry.GetInfoElement(elementName, registry.IANAEnterpriseID)
 		if err != nil {
-			fmt.Printf("Did not find the element with name %v\n", elementName)
-			return
+			logrus.WithFields(logrus.Fields{
+				"element_name": elementName,
+			}).Panic("Could not find matching registry element")
 		}
 		ie := entities.NewInfoElementWithValue(element, nil)
 		elements = append(elements, ie)
@@ -141,12 +154,16 @@ func (fe *IpfixFlowExporter) refreshUniTemplate() {
 
 	_, err := fe.exporter.SendSet(templateSet)
 	if err != nil {
-		fmt.Printf("Got error when sending record: %v\n", err)
-		return
+		logrus.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Error sending Uni Template record set")
+		return err
 	}
+
+	return nil
 }
 
-func (fe *IpfixFlowExporter) refreshBiTemplate() {
+func (fe *IpfixFlowExporter) refreshBiTemplate() error {
 	templateElementNames := []string{"sourceIPv4Address", "destinationIPv4Address", "sourceTransportPort", "destinationTransportPort", "protocolIdentifier", "flowStartMilliseconds", "flowEndMilliseconds", "initiatorOctets", "initiatorPackets", "responderOctets", "responderPackets"}
 
 	templateSet := entities.NewSet(false)
@@ -156,8 +173,9 @@ func (fe *IpfixFlowExporter) refreshBiTemplate() {
 	for _, elementName := range templateElementNames {
 		element, err := registry.GetInfoElement(elementName, registry.IANAEnterpriseID)
 		if err != nil {
-			fmt.Printf("Did not find the element with name %v\n", elementName)
-			return
+			logrus.WithFields(logrus.Fields{
+				"element_name": elementName,
+			}).Panic("Could not find matching registry element")
 		}
 		ie := entities.NewInfoElementWithValue(element, nil)
 		elements = append(elements, ie)
@@ -167,14 +185,25 @@ func (fe *IpfixFlowExporter) refreshBiTemplate() {
 
 	_, err := fe.exporter.SendSet(templateSet)
 	if err != nil {
-		fmt.Printf("Got error when sending record: %v\n", err)
-		return
+		logrus.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Error sending Uni Template record set")
+		return err
 	}
+
+	return nil
 }
 
-func (fe *IpfixFlowExporter) Start() {
-	fe.refreshUniTemplate()
-	fe.refreshBiTemplate()
+func (fe *IpfixFlowExporter) Start() error {
+	err := fe.refreshUniTemplate()
+	if err != nil {
+		return err
+	}
+
+	err = fe.refreshBiTemplate()
+	if err != nil {
+		return err
+	}
 
 	sourceIPv4AddressElement, _ = registry.GetInfoElement("sourceIPv4Address", registry.IANAEnterpriseID)
 	destinationIPv4AddressElement, _ = registry.GetInfoElement("destinationIPv4Address", registry.IANAEnterpriseID)
@@ -191,6 +220,11 @@ func (fe *IpfixFlowExporter) Start() {
 	responderPacketsElement, _ = registry.GetInfoElement("responderPackets", registry.IANAEnterpriseID)
 
 	go func() {
+		logrus.WithFields(logrus.Fields{
+			"target": fe.collectorTarget,
+			"port":   fe.collectorPort,
+		}).Info("Starting IPFIX Exporter")
+
 	InfiniteLoop:
 		for {
 			select {
@@ -199,23 +233,33 @@ func (fe *IpfixFlowExporter) Start() {
 				fe.SendBiDataSet()
 				break InfiniteLoop
 			case flow := <-fe.InputChannel:
-				if fe.GetCurrentUniMessageSize() >= 300 {
+				if fe.GetCurrentUniMessageSize() >= fe.maxRecordSize {
+					logrus.WithFields(logrus.Fields{
+						"current_record_size": fe.GetCurrentUniMessageSize(),
+						"max_record_size":     fe.maxRecordSize,
+					}).Info("Exporting unidirectional flows due to max record size reached")
 					fe.SendUniDataSet()
 				}
-				if fe.GetCurrentBiMessageSize() >= 300 {
+				if fe.GetCurrentBiMessageSize() >= fe.maxRecordSize {
+					logrus.WithFields(logrus.Fields{
+						"current_record_size": fe.GetCurrentBiMessageSize(),
+						"max_record_size":     fe.maxRecordSize,
+					}).Info("Exporting bidirectional flows due to max record size reached")
 					fe.SendBiDataSet()
 				}
 				switch flow.NetworkType {
 				case layers.LayerTypeIPv4:
 					fe.AddIPv4Flow(flow)
 				case layers.LayerTypeIPv6:
-					klog.Info("IPv6 flow exporting not supported yet")
+					logrus.Warning("IPv6 Flows not supported")
 				}
 			}
 		}
-		fmt.Println("IpfixFlowExporter stopped")
+		logrus.Info("Stopped IPFIX Exporter")
+		fe.waitGroup.Done()
 	}()
 
+	return nil
 }
 
 func (fe *IpfixFlowExporter) Stop() {
@@ -230,40 +274,98 @@ func (fe *IpfixFlowExporter) GetCurrentBiMessageSize() int {
 	return 20 + fe.biDataSet.GetBuffer().Len()
 }
 
-func (fe *IpfixFlowExporter) SendUniDataSet() {
+func (fe *IpfixFlowExporter) SendUniDataSet() error {
 
-	_, err := fe.exporter.SendSet(fe.uniDataSet)
-	if err != nil {
-		//TODO retry sending the data set after creating a new exporter
-		fmt.Printf("Got error when sending record: %v\n", err)
-		fe.refreshExporter()
-		fe.refreshUniTemplate()
-		fmt.Printf("Reset exporter")
-		return
+	reconnectFirst := false
+
+	operation := func() error {
+		if reconnectFirst {
+			fe.reconnectExporter()
+			err := fe.refreshUniTemplate()
+			if err != nil {
+				return err
+			}
+			err = fe.refreshBiTemplate()
+			if err != nil {
+				return err
+			}
+		}
+		_, err := fe.exporter.SendSet(fe.uniDataSet)
+
+		// if the send fails, error out so the backoff will retry
+		if err != nil {
+			reconnectFirst = true
+			return err
+		}
+
+		logrus.WithFields(logrus.Fields{
+			"num_flows": fe.uniDataSet.GetNumberOfRecords(),
+		}).Info("Exported unidirectional flows")
+
+		return nil
 	}
-	fmt.Println("sent data set")
-	fe.FlowRecordsSent += uint64(len(fe.uniDataSet.GetRecords()))
+
+	err := backoff.Retry(operation, backoff.NewExponentialBackOff())
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Error sending uni data set")
+		return err
+	}
+
+	fe.FlowRecordsSent += uint64(fe.uniDataSet.GetNumberOfRecords())
 
 	fe.uniDataSet.ResetSet()
 	fe.uniDataSet.PrepareSet(entities.Data, fe.unidirectionalTemplateID)
+
+	return nil
 }
 
-func (fe *IpfixFlowExporter) SendBiDataSet() {
+func (fe *IpfixFlowExporter) SendBiDataSet() error {
 
-	_, err := fe.exporter.SendSet(fe.biDataSet)
-	if err != nil {
-		//TODO retry sending the data set after creating a new exporter
-		fmt.Printf("Got error when sending record: %v\n", err)
-		fe.refreshExporter()
-		fe.refreshBiTemplate()
-		fmt.Printf("Reset exporter")
-		return
+	reconnectFirst := false
+
+	operation := func() error {
+		if reconnectFirst {
+			fe.reconnectExporter()
+			err := fe.refreshUniTemplate()
+			if err != nil {
+				return err
+			}
+			err = fe.refreshBiTemplate()
+			if err != nil {
+				return err
+			}
+		}
+		_, err := fe.exporter.SendSet(fe.biDataSet)
+
+		// if the send fails, error out so the backoff will retry
+		if err != nil {
+			reconnectFirst = true
+			return err
+		}
+
+		logrus.WithFields(logrus.Fields{
+			"num_flows": fe.biDataSet.GetNumberOfRecords(),
+		}).Info("Exported bidirectional flows")
+
+		return nil
 	}
-	fmt.Println("sent data set")
-	fe.FlowRecordsSent += uint64(len(fe.biDataSet.GetRecords()))
+
+	err := backoff.Retry(operation, backoff.NewExponentialBackOff())
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Error sending bi data set")
+		return err
+	}
+
+	fe.FlowRecordsSent += uint64(fe.biDataSet.GetNumberOfRecords())
 
 	fe.biDataSet.ResetSet()
 	fe.biDataSet.PrepareSet(entities.Data, fe.bidirectionalTemplateID)
+
+	return nil
 }
 
 func (fe *IpfixFlowExporter) CloseExporter() {

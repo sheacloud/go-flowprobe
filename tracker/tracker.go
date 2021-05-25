@@ -8,7 +8,7 @@ import (
 	"github.com/google/gopacket"
 	"github.com/sheacloud/go-flowprobe/flow"
 	"github.com/sheacloud/go-flowprobe/utils"
-	"k8s.io/klog"
+	"github.com/sirupsen/logrus"
 )
 
 type FlowTrackerConfiguration struct {
@@ -23,10 +23,10 @@ type FlowTracker struct {
 	NumTables     int
 }
 
-func NewFlowTracker(outputChannel chan flow.Flow, numTables int) *FlowTracker {
+func NewFlowTracker(outputChannel chan flow.Flow, numTables, flowTimeout int) *FlowTracker {
 	tables := make([]*FlowTable, numTables)
 	for i := 0; i < numTables; i++ {
-		tables[i] = NewFlowTable(outputChannel, utils.ActiveFlows.WithLabelValues(strconv.Itoa(i)))
+		tables[i] = NewFlowTable(flowTimeout, i, outputChannel, utils.ActiveFlows.WithLabelValues(strconv.Itoa(i)))
 	}
 
 	return &FlowTracker{
@@ -56,6 +56,7 @@ func (ft *FlowTracker) Start() {
 			select {
 			case <-sweepTicker.C:
 				// run through flow table and clean up old flows
+				logrus.Info("Sweeping FlowTracker Tables")
 				ft.SweepTables()
 			case <-sweepTickerStop:
 				sweepTicker.Stop()
@@ -70,7 +71,6 @@ func (ft *FlowTracker) Start() {
 		for {
 			select {
 			case <-metricTicker.C:
-				// run through flow table and clean up old flows
 				ft.UpdateMetrics()
 			case <-metricTickerStop:
 				metricTicker.Stop()
@@ -79,11 +79,13 @@ func (ft *FlowTracker) Start() {
 		}
 	}()
 
-	klog.Info("Started flow tracker")
+	logrus.WithFields(logrus.Fields{
+		"num_tables": ft.NumTables,
+	}).Info("Starting Flow Tracker")
 }
 
 func (ft *FlowTracker) TrackFlow(key flow.FlowKey, networkLayer gopacket.NetworkLayer, transportLayer gopacket.TransportLayer, ci gopacket.CaptureInfo) {
 	keyHash := key.Hash()
-	flowTableIndex := int64(keyHash) % int64(ft.NumTables)
+	flowTableIndex := keyHash % uint64(ft.NumTables)
 	ft.FlowTables[flowTableIndex].TrackFlow(key, networkLayer, transportLayer, ci)
 }

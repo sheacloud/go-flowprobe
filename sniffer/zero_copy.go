@@ -2,16 +2,13 @@ package sniffer
 
 import (
 	"fmt"
-	"log"
 	"os"
+	"sync"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/afpacket"
-	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
-	"github.com/sheacloud/go-flowprobe/flow"
-	"github.com/sheacloud/go-flowprobe/tracker"
-	"k8s.io/klog"
+	"github.com/sirupsen/logrus"
 )
 
 // afpacketComputeSize computes the block_size and the num_blocks in such a way that the
@@ -40,26 +37,23 @@ func afpacketComputeSize(targetSizeMb int, snaplen int, pageSize int) (
 
 // ZeroCopyFlowSniffer reads from a zero-copy packet stream (like afpacket) and routes it to a FlowTracker based on it's keys
 type ZeroCopyFlowSniffer struct {
-	FlowTracker  *tracker.FlowTracker
-	PacketSource gopacket.ZeroCopyPacketDataSource
-	StopChannel  chan bool
+	PacketSource     gopacket.ZeroCopyPacketDataSource
+	JobChannel       chan<- *PacketJob
+	StopChannel      chan bool
+	Iface            string
+	SnifferNumber    uint16
+	SnifferWaitGroup *sync.WaitGroup
 }
 
 // Start the flow router
 func (fr *ZeroCopyFlowSniffer) Start() {
-	fr.FlowTracker.Start()
 
 	go func() {
-		var eth layers.Ethernet
-		var ip4 layers.IPv4
-		var tcp layers.TCP
-		var udp layers.UDP
-		var icmpv4 layers.ICMPv4
-		var flowKey flow.FlowKey
-		var networkLayer gopacket.NetworkLayer
-		var transportLayer gopacket.TransportLayer
-		parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &tcp, &udp, &icmpv4)
-		decoded := []gopacket.LayerType{}
+
+		logrus.WithFields(logrus.Fields{
+			"iface": fr.Iface,
+		}).Info("Starting ZeroCopy Flow Sniffer")
+
 	InfiniteLoop:
 		for {
 			select {
@@ -67,38 +61,29 @@ func (fr *ZeroCopyFlowSniffer) Start() {
 				break InfiniteLoop
 			default:
 				// TODO don't block forever waiting for a packet, or else we'll never get the channel stop message if no packets are arriving. OptPollTimeout might be the solution
+
+				//Subsequent calls to ZeroCopyReadPacketData will invalidate data, potentially overriding it depending on buffer size
 				data, ci, err := fr.PacketSource.ZeroCopyReadPacketData()
 				if err != nil {
-					log.Fatal(err)
-				}
+					logrus.WithFields(logrus.Fields{
+						"error": err,
+					}).Error("Error reading from zero copy packet source")
+				} else {
 
-				parser.DecodeLayers(data, &decoded)
+					job := PacketJob{
+						data:        data,
+						captureInfo: ci,
+					}
 
-				isIPv4 := false
-				networkLayer = nil
-				transportLayer = nil
-				for _, layerType := range decoded {
-					switch layerType {
-					case layers.LayerTypeIPv4:
-						isIPv4 = true
-						networkLayer = &ip4
-					case layers.LayerTypeTCP:
-						transportLayer = &tcp
-					case layers.LayerTypeUDP:
-						transportLayer = &udp
-					}
-				}
-				if isIPv4 {
-					flowKey, err = flow.GetPacketFlowKey(networkLayer, transportLayer)
-					if err != nil {
-						klog.Error("Error getting flow key from packet")
-						continue
-					}
-					fr.FlowTracker.TrackFlow(flowKey, networkLayer, transportLayer, ci)
+					fr.JobChannel <- &job
+
 				}
 			}
 		}
-		fmt.Println("ZeroCopyFlowSniffer stopped")
+		logrus.WithFields(logrus.Fields{
+			"iface": fr.Iface,
+		}).Info("Stopped ZeroCopy Flow Sniffer")
+		fr.SnifferWaitGroup.Done()
 	}()
 }
 
@@ -110,7 +95,9 @@ func (fr *ZeroCopyFlowSniffer) Stop() {
 func ZeroCopyPacketDataSourceFromDevice(device string, fanoutID uint16) gopacket.ZeroCopyPacketDataSource {
 	szFrame, szBlock, numBlocks, err := afpacketComputeSize(8, 65535, os.Getpagesize())
 	if err != nil {
-		log.Fatal(err)
+		logrus.WithFields(logrus.Fields{
+			"error": err,
+		}).Fatal("Error computing AF packet sizes")
 	}
 
 	tPacket, err := afpacket.NewTPacket(
@@ -124,7 +111,10 @@ func ZeroCopyPacketDataSourceFromDevice(device string, fanoutID uint16) gopacket
 		afpacket.TPacketVersion3,
 	)
 	if err != nil {
-		log.Fatal(err)
+		logrus.WithFields(logrus.Fields{
+			"iface": device,
+			"error": err,
+		}).Fatal("Error getting AFPacket source")
 	}
 
 	tPacket.SetFanout(afpacket.FanoutHash, fanoutID)
@@ -135,12 +125,13 @@ func ZeroCopyPacketDataSourceFromDevice(device string, fanoutID uint16) gopacket
 }
 
 // NewZeroCopyFlowSniffer instantiates a ZeroCopyFlowSniffer
-func NewZeroCopyFlowSniffer(source gopacket.ZeroCopyPacketDataSource, outputChannel chan flow.Flow, snifferNumber uint16) *ZeroCopyFlowSniffer {
-	flowTracker := tracker.NewFlowTracker(outputChannel, 2)
-
+func NewZeroCopyFlowSniffer(source gopacket.ZeroCopyPacketDataSource, jobChannel chan *PacketJob, snifferWaitGroup *sync.WaitGroup, snifferNumber uint16, iface string) *ZeroCopyFlowSniffer {
 	return &ZeroCopyFlowSniffer{
-		FlowTracker:  flowTracker,
-		PacketSource: source,
-		StopChannel:  make(chan bool),
+		PacketSource:     source,
+		SnifferWaitGroup: snifferWaitGroup,
+		StopChannel:      make(chan bool),
+		JobChannel:       jobChannel,
+		SnifferNumber:    snifferNumber,
+		Iface:            iface,
 	}
 }

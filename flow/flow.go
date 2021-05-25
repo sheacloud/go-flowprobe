@@ -2,6 +2,7 @@ package flow
 
 import (
 	"errors"
+	"fmt"
 	"net"
 
 	"github.com/google/gopacket"
@@ -125,6 +126,10 @@ type FlowKey struct {
 	Protocol                layers.IPProtocol
 }
 
+func (fk *FlowKey) String() string {
+	return fmt.Sprintf("%s:%s --%v--> %s:%s", fk.NetworkSourceEndpoint.String(), fk.TransportSourceEndpoint.String(), fk.Protocol, fk.NetworkDestEndpoint.String(), fk.TransportDestEndpoint.String())
+}
+
 // Hash returns a 32bit hash of the flow key
 func (fk *FlowKey) Hash() uint64 {
 	var hash uint64 = 0
@@ -173,8 +178,8 @@ func GetPacketFlowKey(networkLayer gopacket.NetworkLayer, transportLayer gopacke
 	}
 
 	if transportLayer != nil {
-		key.TransportSourceEndpoint = networkLayer.NetworkFlow().Src()
-		key.TransportDestEndpoint = networkLayer.NetworkFlow().Dst()
+		key.TransportSourceEndpoint = transportLayer.TransportFlow().Src()
+		key.TransportDestEndpoint = transportLayer.TransportFlow().Dst()
 	} else {
 		key.TransportSourceEndpoint = gopacket.NewEndpoint(layers.EndpointTCPPort, []byte{0, 0})
 		key.TransportDestEndpoint = gopacket.NewEndpoint(layers.EndpointTCPPort, []byte{0, 0})

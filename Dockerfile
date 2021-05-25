@@ -6,7 +6,7 @@ RUN cd /build; CGO_ENABLED=1 GOBIN=/bin/ go install ./cmd/go-flowprobe;
 
 FROM alpine as prod
 
-RUN apk add libpcap linux-headers;
+RUN apk add --no-cache libpcap linux-headers ca-certificates;
 
 COPY --from=build /bin/go-flowprobe /bin/go-flowprobe
 
